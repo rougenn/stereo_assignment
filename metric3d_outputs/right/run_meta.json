@@ -1,0 +1,18 @@
+{
+  "hf_model_id": "onnx-community/metric3d-vit-large",
+  "onnx_path": "onnx/model.onnx",
+  "providers": [
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "target_size": [
+    518,
+    518
+  ],
+  "ensure_multiple_of": 14,
+  "keep_aspect_ratio": true,
+  "rescale_to_0_1": false,
+  "canonical_focal_px": 1000.0,
+  "fx_orig_px": 573.558349609375,
+  "note": "depth_metric = depth_canonical * (fx_input / 1000.0) (canonical focal=1000px)"
+}
