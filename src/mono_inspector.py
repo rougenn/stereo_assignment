@@ -1,5 +1,3 @@
-# src/inspect_metric3d_interactive.py
-
 import os
 import re
 import glob

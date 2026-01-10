@@ -49,7 +49,6 @@ OUT_JPEG_QUALITY = 100
 
 # If your right/left mapping is inverted after rectify, set this True:
 INVERT_RT = False
-# =========================
 
 
 def ensure_dirs():
@@ -298,7 +297,6 @@ def main():
     print(f"[INFO] Stereo RMS: {stereo_ret:.6f}")
     print(f"[INFO] T (meters): {Tvec.ravel()}  | baseline ~ {np.linalg.norm(Tvec):.6f}")
 
-    # --------- Rectification ---------
     flags = cv2.CALIB_ZERO_DISPARITY if RECTIFY_ZERO_DISPARITY else 0
 
     R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(
@@ -312,7 +310,6 @@ def main():
     mapLx, mapLy = cv2.initUndistortRectifyMap(KL, DL, R1, P1, image_size, cv2.CV_16SC2)
     mapRx, mapRy = cv2.initUndistortRectifyMap(KR, DR, R2, P2, image_size, cv2.CV_16SC2)
 
-    # --------- Save calibration YAMLs (OpenCV style) ---------
     write_opencv_yaml(OUT_LEFT_CALIB_YAML, {
         "rms": float(retL),
         "camera_matrix": KL,
@@ -352,7 +349,7 @@ def main():
 
     print(f"[INFO] Saved YAML:\n  {OUT_LEFT_CALIB_YAML}\n  {OUT_RIGHT_CALIB_YAML}\n  {OUT_STEREO_CALIB_YAML}")
 
-    # --------- Rectify and save ALL pairs (even if chessboard not found) ---------
+    # Rectify and save ALL pairs (even if chessboard not found)
     print("[INFO] Rectifying & saving all matched pairs...")
     for k in keys:
         lp = L[k]

@@ -1,80 +1,16 @@
+# mono_depth_demo.py
+from __future__ import annotations
+
 import os
-import cv2
 import numpy as np
+import cv2
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-
-# Где лежит левый rectified кадр (чтобы видеть реальную сцену)
-RECT_LEFT_DIR = os.path.join(PROJECT_ROOT, "rectified_photos", "left")
-
-# Где лежат результаты FoundationStereo
-FS_OUT_DIR = os.path.join(
-    PROJECT_ROOT,
-    "FoundationStereo_outputs",
-)
-
-# Stereo YAML чтобы считать метры (baseline + fx)
-STEREO_YAML = os.path.join(PROJECT_ROOT, "rectified_photos", "stereo_calibration_opencv.yml")
-
-# Выбор стартовой пары
-START_PAIR = 1
-
-# Файлы внутри папки FS пары
-FS_DISP_NPY = "disp.npy"
-FS_DEPTH_NPY = "depth_meter.npy"   # если вдруг есть, можем читать напрямую
-
-# Настройки визуализации
-WINDOW_NAME = "FoundationStereo Inspector"
-COLORMAP = cv2.COLORMAP_TURBO
-
-# Автодиапазон глубины (если строим depth из disp)
-AUTO_DEPTH_RANGE = True
-DEPTH_P_LOW = 2.0
-DEPTH_P_HIGH = 98.0
-DEPTH_MIN_M = 0.3
-DEPTH_MAX_M = 20.0
-
-# Диспарантность (для колормэпа)
-AUTO_DISP_RANGE = True
-DISP_P_LOW = 2.0
-DISP_P_HIGH = 98.0
-
-# Клавиши:
-# q/ESC: выход
-# n/p: next/prev
-# c: переключить режим (disp <-> depth)
-# s: сохранить скриншот
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
 
 
-def read_stereo_K_and_baseline(stereo_yaml_path: str):
-    if stereo_yaml_path is None or not os.path.exists(stereo_yaml_path):
-        return None, None
-    fs = cv2.FileStorage(stereo_yaml_path, cv2.FILE_STORAGE_READ)
-    if not fs.isOpened():
-        return None, None
-    K1 = fs.getNode("K1").mat()
-    T = fs.getNode("T").mat()
-    P1 = fs.getNode("P1").mat()  # если есть, лучше брать fx из P1
-    fs.release()
-
-    if K1 is None or T is None or np.size(K1) == 0 or np.size(T) == 0:
-        return None, None
-
-    K1 = np.asarray(K1, dtype=np.float32).reshape(3, 3)
-    T = np.asarray(T, dtype=np.float32).reshape(3, 1)
-    baseline = float(np.linalg.norm(T))
-
-    # fx: лучше из P1 если есть
-    if P1 is not None and np.size(P1) != 0:
-        P1 = np.asarray(P1, dtype=np.float32)
-        fx = float(P1[0, 0])
-    else:
-        fx = float(K1[0, 0])
-
-    return fx, baseline
-
-
-def robust_range(arr, p_low, p_high):
+def _robust_range(arr: np.ndarray, p_low: float = 2.0, p_high: float = 98.0) -> tuple[float, float]:
     mask = np.isfinite(arr)
     if not np.any(mask):
         return 0.0, 1.0
@@ -86,179 +22,130 @@ def robust_range(arr, p_low, p_high):
     return lo, hi
 
 
-def colorize_scalar_map(x: np.ndarray, vmin: float, vmax: float, invert=False):
-    xx = x.copy().astype(np.float32)
-    xx[~np.isfinite(xx)] = vmax
+def _load_image_rgb(image_path: str) -> np.ndarray:
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
 
-    xx = np.clip(xx, vmin, vmax)
-    norm = (xx - vmin) / (vmax - vmin + 1e-8)
-    if invert:
-        norm = 1.0 - norm
-    img8 = (norm * 255.0).astype(np.uint8)
-    return cv2.applyColorMap(img8, COLORMAP)
+    img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise ValueError(f"Failed to read image (cv2.imread returned None): {image_path}")
 
-
-def load_pair(pair_idx: int):
-    # FS pair dir: .../all_pairs_rectified/01
-    pdir = os.path.join(FS_OUT_DIR, f"{pair_idx:02d}")
-    if not os.path.isdir(pdir):
-        return None
-
-    disp_path = os.path.join(pdir, FS_DISP_NPY)
-    if not os.path.exists(disp_path):
-        return None
-
-    disp = np.load(disp_path).astype(np.float32)
-
-    # left rect image from rectified_photos/left/<k>.jpg (note: there filenames are 1.jpg..)
-    left_img_path = os.path.join(RECT_LEFT_DIR, f"{pair_idx}.jpg")
-    left = cv2.imread(left_img_path, cv2.IMREAD_COLOR)
-    if left is None:
-        # fallback: try png
-        left_img_path = os.path.join(RECT_LEFT_DIR, f"{pair_idx}.png")
-        left = cv2.imread(left_img_path, cv2.IMREAD_COLOR)
-
-    # If left not found, just show blank
-    if left is None:
-        left = np.zeros((disp.shape[0], disp.shape[1], 3), dtype=np.uint8)
-        left_img_path = "(not found)"
-
-    # Ensure same size
-    if left.shape[:2] != disp.shape[:2]:
-        left = cv2.resize(left, (disp.shape[1], disp.shape[0]), interpolation=cv2.INTER_AREA)
-
-    return {
-        "pdir": pdir,
-        "disp": disp,
-        "left": left,
-        "left_path": left_img_path,
-        "disp_path": disp_path,
-    }
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    return img_rgb
 
 
-class State:
-    def __init__(self):
-        self.x = 0
-        self.y = 0
-        self.locked = False
-        self.lx = 0
-        self.ly = 0
-        self.mode = "disp"  # or "depth"
+def _load_depth(depth_path: str) -> np.ndarray:
+    if not os.path.exists(depth_path):
+        raise FileNotFoundError(f"Depth not found: {depth_path}")
 
-
-def main():
-    fx, baseline = read_stereo_K_and_baseline(STEREO_YAML)
-    has_metric = (fx is not None and baseline is not None)
-    if has_metric:
-        print(f"[INFO] metric enabled: fx={fx:.3f}, baseline={baseline:.6f} m")
+    ext = os.path.splitext(depth_path)[1].lower()
+    if ext == ".npy":
+        depth = np.load(depth_path).astype(np.float32)
     else:
-        print("[WARN] Cannot read fx/baseline from stereo yaml -> will show disparity only.")
+        # fallback: попробуем прочитать как картинку (на всякий случай)
+        d = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+        if d is None:
+            raise ValueError(f"Failed to read depth: {depth_path}")
+        depth = d.astype(np.float32)
 
-    state = State()
-    pair = int(START_PAIR)
-    data = load_pair(pair)
-    if data is None:
-        raise SystemExit(f"Cannot load FS pair {pair}. Check FS_OUT_DIR={FS_OUT_DIR}")
+    if depth.ndim != 2:
+        raise ValueError(f"Depth must be 2D array, got shape={depth.shape} from {depth_path}")
 
-    def on_mouse(event, x, y, flags, userdata):
-        if event == cv2.EVENT_MOUSEMOVE:
-            state.x, state.y = x, y
-        elif event == cv2.EVENT_LBUTTONDOWN:
-            state.locked = True
-            state.lx, state.ly = x, y
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            state.locked = False
-
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback(WINDOW_NAME, on_mouse)
-
-    while True:
-        left = data["left"].copy()
-        disp = data["disp"]
-
-        H, W = disp.shape[:2]
-        cx = int(np.clip(state.x, 0, W - 1))
-        cy = int(np.clip(state.y, 0, H - 1))
-        if state.locked:
-            px, py = int(np.clip(state.lx, 0, W - 1)), int(np.clip(state.ly, 0, H - 1))
-        else:
-            px, py = cx, cy
-
-        d = float(disp[py, px])
-        d_valid = np.isfinite(d) and d > 0.1
-
-        # choose render map
-        if state.mode == "depth" and has_metric:
-            depth = np.full_like(disp, np.inf, dtype=np.float32)
-            valid = np.isfinite(disp) & (disp > 0.1)
-            depth[valid] = (fx * baseline) / disp[valid]
-
-            if AUTO_DEPTH_RANGE:
-                dmin, dmax = robust_range(depth, DEPTH_P_LOW, DEPTH_P_HIGH)
-            else:
-                dmin, dmax = float(DEPTH_MIN_M), float(DEPTH_MAX_M)
-
-            right = colorize_scalar_map(depth, dmin, dmax, invert=True)
-
-            z = float((fx * baseline) / d) if d_valid else float("nan")
-            msg = f"pair={pair:02d} x={px} y={py}  disp={d:.2f}px  depth={z:.3f}m  (depth range {dmin:.2f}..{dmax:.2f})"
-        else:
-            if AUTO_DISP_RANGE:
-                vmin, vmax = robust_range(disp, DISP_P_LOW, DISP_P_HIGH)
-            else:
-                vmin, vmax = 0.0, float(np.nanmax(disp)) if np.isfinite(disp).any() else 1.0
-
-            right = colorize_scalar_map(disp, vmin, vmax, invert=False)
-            msg = f"pair={pair:02d} x={px} y={py}  disp={d:.2f}px  (disp range {vmin:.2f}..{vmax:.2f})"
-            if has_metric and d_valid:
-                z = float((fx * baseline) / d)
-                msg += f"  depth={z:.3f}m"
-
-        # draw markers
-        cv2.circle(left, (px, py), 6, (0, 255, 0), 2)
-        cv2.circle(right, (px, py), 6, (0, 255, 0), 2)
-
-        vis = np.concatenate([left, right], axis=1)
-
-        # header
-        cv2.rectangle(vis, (0, 0), (vis.shape[1], 45), (0, 0, 0), -1)
-        cv2.putText(vis, msg, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-
-        hint = "mouse move=read | LMB=lock | RMB=unlock | n/p pair | c disp/depth | s screenshot | q quit"
-        cv2.rectangle(vis, (0, vis.shape[0]-35), (vis.shape[1], vis.shape[0]), (0, 0, 0), -1)
-        cv2.putText(vis, hint, (10, vis.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-
-        cv2.imshow(WINDOW_NAME, vis)
-        key = cv2.waitKey(15) & 0xFF
-
-        if key in [27, ord("q")]:
-            break
-        elif key == ord("n"):
-            pair += 1
-            new_data = load_pair(pair)
-            if new_data is None:
-                pair -= 1
-            else:
-                data = new_data
-                state.locked = False
-        elif key == ord("p"):
-            pair = max(1, pair - 1)
-            new_data = load_pair(pair)
-            if new_data is not None:
-                data = new_data
-                state.locked = False
-        elif key == ord("c"):
-            if state.mode == "disp":
-                state.mode = "depth" if has_metric else "disp"
-            else:
-                state.mode = "disp"
-        elif key == ord("s"):
-            out_path = os.path.join(data["pdir"], f"inspect_{state.mode}.png")
-            cv2.imwrite(out_path, vis)
-            print(f"[SAVED] {out_path}")
-
-    cv2.destroyAllWindows()
+    return depth
 
 
-if __name__ == "__main__":
-    main()
+def mono_neural_demonstrate(
+    rectified_image_path: str,
+    depth_path: str,
+    *,
+    title: str | None = None,
+    auto_depth_range: bool = True,
+    p_low: float = 2.0,
+    p_high: float = 98.0,
+    depth_min_m: float = 0.3,
+    depth_max_m: float = 50.0,
+    colorscale: str = "Turbo",
+    renderer: str | None = "colab",
+    height: int = 520,
+    width: int = 1050,
+    show: bool = True,
+):
+    """
+    Показывает интерактивную пару:
+      - слева RGB, при наведении показывается depth (tooltip)
+      - справа depth heatmap
+    Принимает ровно 2 пути: rectified image и depth (обычно depth_meter.npy).
+
+    Возвращает plotly Figure.
+    """
+
+    if renderer:
+        # "colab" хорошо для Google Colab, в обычном Jupyter можно поставить "notebook_connected" или "browser"
+        pio.renderers.default = renderer
+
+    img_rgb = _load_image_rgb(rectified_image_path)
+    depth = _load_depth(depth_path)
+
+    # подгоним размеры (как у вас было)
+    if img_rgb.shape[:2] != depth.shape[:2]:
+        img_rgb = cv2.resize(img_rgb, (depth.shape[1], depth.shape[0]), interpolation=cv2.INTER_AREA)
+
+    # диапазон для отображения depth-heatmap
+    if auto_depth_range:
+        vmin, vmax = _robust_range(depth, p_low, p_high)
+    else:
+        vmin, vmax = float(depth_min_m), float(depth_max_m)
+
+    # hover шаблон
+    hover_tmpl = "x=%{x} y=%{y}<br>depth=%{z:.3f} m<extra></extra>"
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("RGB (hover → depth)", "Depth (m)"),
+        horizontal_spacing=0.02,
+    )
+
+    # 1) RGB
+    fig.add_trace(go.Image(z=img_rgb), 1, 1)
+
+    # Невидимый слой поверх RGB, чтобы hover показывал глубину на том же пикселе
+    fig.add_trace(
+        go.Heatmap(
+            z=depth,
+            opacity=0.0,
+            showscale=False,
+            hovertemplate=hover_tmpl,
+        ),
+        1, 1
+    )
+
+    # 2) Depth
+    fig.add_trace(
+        go.Heatmap(
+            z=depth,
+            colorscale=colorscale,
+            zmin=vmin,
+            zmax=vmax,
+            colorbar=dict(title="m"),
+            hovertemplate=hover_tmpl,
+        ),
+        1, 2
+    )
+
+    # чтобы y шёл как в изображениях (сверху вниз)
+    fig.update_yaxes(autorange="reversed", scaleanchor="x", row=1, col=1)
+    fig.update_yaxes(autorange="reversed", scaleanchor="x", row=1, col=2)
+
+    fig.update_layout(
+        title=title,
+        height=height,
+        width=width,
+        hovermode="closest",
+        margin=dict(l=10, r=10, t=60 if title else 40, b=10),
+    )
+
+    if show:
+        fig.show()
+
+    return fig
