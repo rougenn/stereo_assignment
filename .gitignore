@@ -4,3 +4,5 @@ FoundationStereo
 *.yml
 FoundationStereo
 Metric3D
+**/.DS_Store
+.DS_Store
